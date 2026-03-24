@@ -1,8 +1,8 @@
 import joplin from 'api';
+import { SettingItemType } from 'api/types';
 import { VectorStore } from './VectorStore';
 import { EmbeddingService } from './EmbeddingService';
 import { SearchCoordinator, SearchResult } from './SearchCoordinator';
-import { SettingItemType } from 'api/types';
 
 let vectorStore: VectorStore = null;
 let searchCoordinator: SearchCoordinator = null;
@@ -10,90 +10,88 @@ let isIndexing = false;
 
 joplin.plugins.register({
 	onStart: async function() {
-		console.info('AI Search plugin started');
+		console.info('AI Search: onStart called');
+		try {
+			const dataDir = await joplin.plugins.dataDir();
+			console.info('AI Search: data dir:', dataDir);
 
-		// Get Joplin profile directory for storing index files
-		const profileDir = await joplin.settings.globalValue('profileDir');
-		vectorStore = new VectorStore(profileDir);
-		await vectorStore.initialize();
-		searchCoordinator = new SearchCoordinator(vectorStore);
+			vectorStore = new VectorStore(dataDir);
+			await vectorStore.initialize();
+			console.info('AI Search: vector store ready');
 
-		// Register settings
-		await joplin.settings.registerSection('aiSearch', {
-			label: 'AI Search',
-			iconName: 'fas fa-search',
-		});
+			searchCoordinator = new SearchCoordinator(vectorStore);
 
-		await joplin.settings.registerSettings({
-			'aiSearch.enabled': {
-				value: true,
-				type: SettingItemType.Bool,
-				section: 'aiSearch',
-				public: true,
-				label: 'Enable AI-powered semantic search',
-			},
-			'aiSearch.hybridMode': {
-				value: true,
-				type: SettingItemType.Bool,
-				section: 'aiSearch',
-				public: true,
-				label: 'Hybrid mode (combine semantic + keyword results)',
-			},
-		});
+			await joplin.settings.registerSection('aiSearch', {
+				label: 'AI Search',
+				iconName: 'fas fa-search',
+			});
 
-		// Register the search panel
-		const panel = await joplin.views.panels.create('aiSearchPanel');
-		await joplin.views.panels.setHtml(panel, getSearchPanelHtml());
-		await joplin.views.panels.addScript(panel, './searchPanel.js');
-		await joplin.views.panels.show(panel);
+			await joplin.settings.registerSettings({
+				'aiSearch.enabled': {
+					value: true,
+					type: SettingItemType.Bool,
+					section: 'aiSearch',
+					public: true,
+					label: 'Enable AI-powered semantic search',
+				},
+				'aiSearch.hybridMode': {
+					value: true,
+					type: SettingItemType.Bool,
+					section: 'aiSearch',
+					public: true,
+					label: 'Hybrid mode (combine semantic + keyword results)',
+				},
+			});
 
-		// Handle messages from the search panel UI
-		await joplin.views.panels.onMessage(panel, async (message) => {
-			if (message.type === 'search') {
-				return await handleSearch(message.query);
-			}
-			if (message.type === 'indexAll') {
-				return await indexAllNotes();
-			}
-			if (message.type === 'getStatus') {
-				return {
-					noteCount: vectorStore.getNoteCount(),
-					isIndexing,
-				};
-			}
-		});
+			const panel = await joplin.views.panels.create('aiSearchPanel');
+			await joplin.views.panels.setHtml(panel, getSearchPanelHtml());
+			await joplin.views.panels.addScript(panel, 'searchPanel.js');
+			await joplin.views.panels.show(panel);
 
-		// Register command to toggle panel
-		await joplin.commands.register({
-			name: 'aiSearch.togglePanel',
-			label: 'Toggle AI Search Panel',
-			execute: async () => {
-				const visible = await joplin.views.panels.visible(panel);
-				await joplin.views.panels.show(panel, !visible);
-			},
-		});
+			await joplin.views.panels.onMessage(panel, async (message) => {
+				if (message.type === 'search') {
+					return await handleSearch(message.query);
+				}
+				if (message.type === 'indexAll') {
+					return await indexAllNotes();
+				}
+				if (message.type === 'getStatus') {
+					return {
+						noteCount: await vectorStore.getNoteCount(),
+						isIndexing,
+					};
+				}
+			});
 
-		// Add to tools menu
-		await joplin.views.menuItems.create(
-			'aiSearch.menuItem',
-			'aiSearch.togglePanel',
-			'tools' as any,
-		);
+			await joplin.commands.register({
+				name: 'aiSearch.togglePanel',
+				label: 'Toggle AI Search Panel',
+				execute: async () => {
+					const visible = await joplin.views.panels.visible(panel);
+					await joplin.views.panels.show(panel, !visible);
+				},
+			});
 
-		// Listen for note changes to keep index updated
-		await joplin.workspace.onNoteChange(async (event: any) => {
-			if (event.event === 3) {
-				// Delete
-				await vectorStore.delete(event.id);
-			} else {
-				// Create or update — debounce by waiting 2 seconds
-				setTimeout(async () => {
-					await indexNote(event.id);
-				}, 2000);
-			}
-		});
+			await joplin.views.menuItems.create(
+				'aiSearch.menuItem',
+				'aiSearch.togglePanel',
+				'tools' as any,
+			);
 
-		console.info('AI Search plugin ready');
+			await joplin.workspace.onNoteChange(async (event: any) => {
+				if (event.event === 3) {
+					await vectorStore.delete(event.id);
+				} else {
+					setTimeout(async () => {
+						await indexNote(event.id);
+					}, 2000);
+				}
+			});
+
+			console.info('AI Search: plugin ready');
+		} catch (error) {
+			console.error('AI Search plugin error:', error);
+		}
 	},
 });
 
@@ -102,7 +100,7 @@ async function handleSearch(query: string): Promise<SearchResult[]> {
 	try {
 		return await searchCoordinator.search(query, [], 10);
 	} catch (error) {
-		console.error('AI Search error:', error);
+		console.error('AI Search search error:', error);
 		return [];
 	}
 }
@@ -120,34 +118,31 @@ async function indexNote(noteId: string): Promise<void> {
 			title: note.title,
 			updatedTime: note.updated_time,
 		});
+		console.info(`AI Search: indexed note "${note.title}"`);
 	} catch (error) {
-		console.error(`AI Search: Failed to index note ${noteId}:`, error);
+		console.error(`AI Search: failed to index note ${noteId}:`, error);
 	}
 }
 
 async function indexAllNotes(): Promise<void> {
 	if (isIndexing) return;
 	isIndexing = true;
-	console.info('AI Search: Starting full index...');
-
+	console.info('AI Search: starting full index...');
 	try {
 		let page = 1;
 		let hasMore = true;
-
 		while (hasMore) {
 			const result = await joplin.data.get(['notes'], {
 				fields: ['id', 'title', 'body', 'updated_time'],
 				page,
 			});
-
 			for (const note of result.items) {
 				await indexNote(note.id);
 			}
-
 			hasMore = result.has_more;
 			page++;
 		}
-		console.info('AI Search: Full index complete');
+		console.info('AI Search: full index complete');
 	} finally {
 		isIndexing = false;
 	}
@@ -179,12 +174,14 @@ function getSearchPanelHtml(): string {
     margin-top: 8px; padding: 6px 12px;
     background: #1890ff; color: white;
     border: none; border-radius: 4px; cursor: pointer;
+    width: 100%;
   }
+  #indexBtn:disabled { background: #ccc; }
 </style>
 </head>
 <body>
   <input id="searchInput" type="text" placeholder="Search notes in natural language..." />
-  <div id="status">Ready</div>
+  <div id="status">Initialising...</div>
   <button id="indexBtn">Index All Notes</button>
   <div id="results"></div>
 </body>

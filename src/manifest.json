@@ -1,7 +1,7 @@
 {
 	"manifest_version": 1,
 	"id": "com.amirtha.joplin.ai-search",
-	"app_min_version": "3.5",
+	"app_min_version": "2.0",
 	"version": "1.0.0",
 	"name": "Joplin AI Search",
 	"description": "AI powered semantic search for Joplin notes using local embeddings",
@@ -12,5 +12,6 @@
 	"categories": [],
 	"screenshots": [],
 	"icons": {},
-	"promo_tile": {}
+	"promo_tile": {},
+	"platforms": ["desktop"]
 }

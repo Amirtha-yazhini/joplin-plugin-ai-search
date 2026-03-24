@@ -1,115 +1,84 @@
-import * as path from 'path';
 import * as fs from 'fs';
+import * as path from 'path';
 
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const hnswlib = require('hnswlib-node');
-
-interface NoteMetadata {
+interface NoteVector {
 	noteId: string;
 	title: string;
 	updatedTime: number;
-}
-
-interface VectorStoreData {
-	metadata: Record<number, NoteMetadata>;
-	nextId: number;
-	noteIdToVectorId: Record<string, number>;
+	vector: number[];
 }
 
 export class VectorStore {
-	private index: any = null;
-	private metadata: Record<number, NoteMetadata> = {};
-	private nextId = 0;
-	private noteIdToVectorId: Record<string, number> = {};
-	private readonly dimensions = 384;
-	private readonly maxElements = 10000;
-	private indexPath: string;
+	private items: NoteVector[] = [];
 	private dataPath: string;
 
 	public constructor(storageDir: string) {
-		this.indexPath = path.join(storageDir, 'ai_search.index');
-		this.dataPath = path.join(storageDir, 'ai_search.json');
+		this.dataPath = path.join(storageDir, 'ai_search_vectors.json');
 	}
 
-	// Initialize or load existing index from disk
 	public async initialize(): Promise<void> {
-		this.index = new hnswlib.HierarchicalNSW('cosine', this.dimensions);
-
-		if (fs.existsSync(this.indexPath) && fs.existsSync(this.dataPath)) {
-			console.info('AI Search: Loading existing index from disk...');
-			await this.index.readIndex(this.indexPath, this.maxElements);
+		if (fs.existsSync(this.dataPath)) {
+			console.info('AI Search: Loading existing vectors...');
 			const raw = fs.readFileSync(this.dataPath, 'utf8');
-			const data: VectorStoreData = JSON.parse(raw);
-			this.metadata = data.metadata;
-			this.nextId = data.nextId;
-			this.noteIdToVectorId = data.noteIdToVectorId;
-			console.info(`AI Search: Loaded ${this.nextId} note vectors`);
+			this.items = JSON.parse(raw);
+			console.info(`AI Search: Loaded ${this.items.length} vectors`);
 		} else {
-			console.info('AI Search: Creating new index...');
-			this.index.initIndex(this.maxElements);
+			console.info('AI Search: Starting with empty vector store');
+			this.items = [];
 		}
 	}
 
-	// Add or update a note's vector
 	public async upsert(
 		noteId: string,
 		vector: number[],
-		metadata: NoteMetadata,
+		metadata: { noteId: string; title: string; updatedTime: number },
 	): Promise<void> {
-		// If note already exists, reuse its vector ID
-		let vectorId = this.noteIdToVectorId[noteId];
-		if (vectorId === undefined) {
-			vectorId = this.nextId++;
-			this.noteIdToVectorId[noteId] = vectorId;
-		}
-
-		this.index.addPoint(vector, vectorId);
-		this.metadata[vectorId] = metadata;
-		await this.persist();
+		// Remove existing entry for this note
+		this.items = this.items.filter(item => item.noteId !== noteId);
+		this.items.push({ ...metadata, vector });
+		this.persist();
 	}
 
-	// Remove a note from the index
 	public async delete(noteId: string): Promise<void> {
-		const vectorId = this.noteIdToVectorId[noteId];
-		if (vectorId === undefined) return;
-
-		this.index.markDelete(vectorId);
-		delete this.metadata[vectorId];
-		delete this.noteIdToVectorId[noteId];
-		await this.persist();
+		this.items = this.items.filter(item => item.noteId !== noteId);
+		this.persist();
 	}
 
-	// Search for similar notes
 	public async search(
 		queryVector: number[],
 		topK = 5,
 	): Promise<Array<{ noteId: string; title: string; score: number }>> {
-		if (this.nextId === 0) return [];
+		if (this.items.length === 0) return [];
 
-		const k = Math.min(topK, this.nextId);
-		const result = this.index.searchKnn(queryVector, k);
+		const scored = this.items.map(item => ({
+			noteId: item.noteId,
+			title: item.title,
+			score: this.cosineSimilarity(queryVector, item.vector),
+		}));
 
-		return result.neighbors
-			.map((vectorId: number, i: number) => ({
-				noteId: this.metadata[vectorId]?.noteId,
-				title: this.metadata[vectorId]?.title,
-				score: 1 - result.distances[i], // cosine similarity
-			}))
-			.filter((r: any) => r.noteId);
-	}
-
-	// Save index and metadata to disk
-	private async persist(): Promise<void> {
-		await this.index.writeIndex(this.indexPath);
-		const data: VectorStoreData = {
-			metadata: this.metadata,
-			nextId: this.nextId,
-			noteIdToVectorId: this.noteIdToVectorId,
-		};
-		fs.writeFileSync(this.dataPath, JSON.stringify(data), 'utf8');
+		return scored
+			.sort((a, b) => b.score - a.score)
+			.slice(0, topK);
 	}
 
 	public getNoteCount(): number {
-		return this.nextId;
+		return this.items.length;
+	}
+
+	private cosineSimilarity(a: number[], b: number[]): number {
+		let dot = 0;
+		let normA = 0;
+		let normB = 0;
+		for (let i = 0; i < a.length; i++) {
+			dot += a[i] * b[i];
+			normA += a[i] * a[i];
+			normB += b[i] * b[i];
+		}
+		if (normA === 0 || normB === 0) return 0;
+		return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+	}
+
+	private persist(): void {
+		fs.writeFileSync(this.dataPath, JSON.stringify(this.items), 'utf8');
 	}
 }

@@ -197,7 +197,8 @@ const pluginConfig = { ...baseConfig, entry: './src/index.ts',
 		'sharp': 'commonjs sharp',
 		'onnxruntime-node': 'commonjs onnxruntime-node',
 		'hnswlib-node': 'commonjs hnswlib-node',
-		'@xenova/transformers': 'commonjs @xenova/transformers',
+		
+    	
 	},
 	resolve: {
 		alias: {
@@ -304,9 +305,7 @@ function resolveExtraScriptPath(name) {
 		output: {
 			filename: `${nameNoExt}.js`,
 			path: distDir,
-			library: 'default',
-			libraryTarget: 'commonjs',
-			libraryExport: 'default',
+			
 		},
 	};
 }
