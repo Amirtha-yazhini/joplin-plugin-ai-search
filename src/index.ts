@@ -1,7 +1,6 @@
 import joplin from 'api';
 import { SettingItemType } from 'api/types';
 import { VectorStore } from './VectorStore';
-import { EmbeddingService } from './EmbeddingService';
 import { SearchCoordinator, SearchResult } from './SearchCoordinator';
 
 let vectorStore: VectorStore = null;
@@ -13,12 +12,12 @@ joplin.plugins.register({
 		console.info('AI Search: onStart called');
 		try {
 			const dataDir = await joplin.plugins.dataDir();
-			console.info('AI Search: data dir:', dataDir);
+			const installDir = await joplin.plugins.installationDir();
+			console.info('AI Search: installDir =', installDir);
+			console.info('AI Search: dataDir =', dataDir);
 
 			vectorStore = new VectorStore(dataDir);
 			await vectorStore.initialize();
-			console.info('AI Search: vector store ready');
-
 			searchCoordinator = new SearchCoordinator(vectorStore);
 
 			await joplin.settings.registerSection('aiSearch', {
@@ -34,32 +33,93 @@ joplin.plugins.register({
 					public: true,
 					label: 'Enable AI-powered semantic search',
 				},
-				'aiSearch.hybridMode': {
-					value: true,
-					type: SettingItemType.Bool,
-					section: 'aiSearch',
-					public: true,
-					label: 'Hybrid mode (combine semantic + keyword results)',
-				},
 			});
 
 			const panel = await joplin.views.panels.create('aiSearchPanel');
-			await joplin.views.panels.setHtml(panel, getSearchPanelHtml());
+
+			// Pass installDir as a global variable into the panel HTML
+			await joplin.views.panels.setHtml(panel, `
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body { font-family: sans-serif; padding: 10px; margin: 0; background: white; }
+  #searchInput {
+    width: 100%; padding: 8px; font-size: 14px;
+    border: 1px solid #ccc; border-radius: 4px;
+    box-sizing: border-box; margin-bottom: 6px;
+  }
+  #status {
+    font-size: 11px; color: #666; padding: 4px;
+    background: #f5f5f5; border-radius: 3px; margin-bottom: 6px;
+    min-height: 18px;
+  }
+  #indexBtn {
+    padding: 6px 12px; background: #1890ff; color: white;
+    border: none; border-radius: 4px; cursor: pointer;
+    width: 100%; font-size: 13px; margin-bottom: 6px;
+  }
+  #indexBtn:disabled { background: #ccc; cursor: not-allowed; }
+  .result-item {
+    padding: 8px; margin: 4px 0; border: 1px solid #eee;
+    border-radius: 4px; cursor: pointer;
+  }
+  .result-item:hover { background: #f0f7ff; }
+  .result-title { font-weight: bold; font-size: 13px; color: #1F4E79; }
+  .result-score { font-size: 11px; color: #888; }
+</style>
+</head>
+<body>
+  <input id="searchInput" type="text" placeholder="Search notes in natural language..." />
+  <div id="status">Loading AI model...</div>
+  <button id="indexBtn" disabled>Index All Notes</button>
+  <div id="results"></div>
+  <script>
+    // Install dir injected from plugin
+    window.PLUGIN_INSTALL_DIR = ${JSON.stringify(installDir)};
+  </script>
+</body>
+</html>`);
+
+			// Add the search panel script which loads the model
 			await joplin.views.panels.addScript(panel, 'searchPanel.js');
 			await joplin.views.panels.show(panel);
 
 			await joplin.views.panels.onMessage(panel, async (message) => {
-				if (message.type === 'search') {
-					return await handleSearch(message.query);
+				if (message.type === 'getNotes') {
+					const notes = [];
+					let page = 1;
+					let hasMore = true;
+					while (hasMore) {
+						const result = await joplin.data.get(['notes'], {
+							fields: ['id', 'title', 'body'],
+							page,
+						});
+						notes.push(...result.items);
+						hasMore = result.has_more;
+						page++;
+					}
+					return notes;
 				}
-				if (message.type === 'indexAll') {
-					return await indexAllNotes();
+				if (message.type === 'storeVectors') {
+					for (const item of message.vectors) {
+						await vectorStore.upsert(item.noteId, item.vector, {
+							noteId: item.noteId,
+							title: item.title,
+							updatedTime: Date.now(),
+						});
+					}
+					return { success: true, count: vectorStore.getNoteCount() };
+				}
+				if (message.type === 'searchWithVector') {
+					return await vectorStore.search(message.vector, 10);
+				}
+				if (message.type === 'openNote') {
+					await joplin.commands.execute('openNote', message.noteId);
+					return {};
 				}
 				if (message.type === 'getStatus') {
-					return {
-						noteCount: await vectorStore.getNoteCount(),
-						isIndexing,
-					};
+					return { noteCount: vectorStore.getNoteCount(), isIndexing };
 				}
 			});
 
@@ -81,109 +141,12 @@ joplin.plugins.register({
 			await joplin.workspace.onNoteChange(async (event: any) => {
 				if (event.event === 3) {
 					await vectorStore.delete(event.id);
-				} else {
-					setTimeout(async () => {
-						await indexNote(event.id);
-					}, 2000);
 				}
 			});
 
-			console.info('AI Search: plugin ready');
+			console.info('AI Search: plugin ready. installDir =', installDir);
 		} catch (error) {
 			console.error('AI Search plugin error:', error);
 		}
 	},
 });
-
-async function handleSearch(query: string): Promise<SearchResult[]> {
-	if (!query || !searchCoordinator) return [];
-	try {
-		return await searchCoordinator.search(query, [], 10);
-	} catch (error) {
-		console.error('AI Search search error:', error);
-		return [];
-	}
-}
-
-async function indexNote(noteId: string): Promise<void> {
-	try {
-		const note = await joplin.data.get(['notes', noteId], {
-			fields: ['id', 'title', 'body', 'updated_time'],
-		});
-		const text = `${note.title}\n${note.body}`;
-		const embeddingService = EmbeddingService.getInstance();
-		const vector = await embeddingService.embed(text);
-		await vectorStore.upsert(noteId, vector, {
-			noteId: note.id,
-			title: note.title,
-			updatedTime: note.updated_time,
-		});
-		console.info(`AI Search: indexed note "${note.title}"`);
-	} catch (error) {
-		console.error(`AI Search: failed to index note ${noteId}:`, error);
-	}
-}
-
-async function indexAllNotes(): Promise<void> {
-	if (isIndexing) return;
-	isIndexing = true;
-	console.info('AI Search: starting full index...');
-	try {
-		let page = 1;
-		let hasMore = true;
-		while (hasMore) {
-			const result = await joplin.data.get(['notes'], {
-				fields: ['id', 'title', 'body', 'updated_time'],
-				page,
-			});
-			for (const note of result.items) {
-				await indexNote(note.id);
-			}
-			hasMore = result.has_more;
-			page++;
-		}
-		console.info('AI Search: full index complete');
-	} finally {
-		isIndexing = false;
-	}
-}
-
-function getSearchPanelHtml(): string {
-	return `
-<!DOCTYPE html>
-<html>
-<head>
-<style>
-  body { font-family: sans-serif; padding: 10px; }
-  #searchInput {
-    width: 100%; padding: 8px; font-size: 14px;
-    border: 1px solid #ccc; border-radius: 4px;
-    box-sizing: border-box;
-  }
-  #results { margin-top: 10px; }
-  .result-item {
-    padding: 8px; margin: 4px 0;
-    border: 1px solid #eee; border-radius: 4px;
-    cursor: pointer;
-  }
-  .result-item:hover { background: #f5f5f5; }
-  .result-title { font-weight: bold; font-size: 13px; }
-  .result-score { font-size: 11px; color: #888; }
-  #status { font-size: 11px; color: #666; margin-top: 5px; }
-  #indexBtn {
-    margin-top: 8px; padding: 6px 12px;
-    background: #1890ff; color: white;
-    border: none; border-radius: 4px; cursor: pointer;
-    width: 100%;
-  }
-  #indexBtn:disabled { background: #ccc; }
-</style>
-</head>
-<body>
-  <input id="searchInput" type="text" placeholder="Search notes in natural language..." />
-  <div id="status">Initialising...</div>
-  <button id="indexBtn">Index All Notes</button>
-  <div id="results"></div>
-</body>
-</html>`;
-}

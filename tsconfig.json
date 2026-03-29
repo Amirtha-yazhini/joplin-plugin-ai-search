@@ -1,16 +1,13 @@
 {
-	"compilerOptions": {
-		"outDir": "./dist/",
-		"module": "commonjs",
-		"target": "es2015",
-		"jsx": "react",
-		"allowJs": true,
-		"baseUrl": ".",
-		"skipLibCheck": true
-	},
-	"exclude": [
-    "node_modules",
-    "dist",
-    "api"
-  ]
+  "compilerOptions": {
+    "outDir": "./dist/",
+    "module": "commonjs",
+    "target": "es2015",
+    "lib": ["es2015", "dom"],
+    "jsx": "react",
+    "allowJs": true,
+    "baseUrl": ".",
+    "skipLibCheck": true
+  },
+  "exclude": ["node_modules", "dist", "api"]
 }
